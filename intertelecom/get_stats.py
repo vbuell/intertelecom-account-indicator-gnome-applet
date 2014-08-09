@@ -3,14 +3,17 @@
 import appindicator
 import gtk
 import gobject
+import tempfile
+import math
 
 from tools import *
 from lxml import html, etree
 
 COLOR_DICT={
-            'white':(255,255,255),
-            'red':(255,0,0),
-            'green':(0,255,0)
+            'white':'#fff',
+            'red':'#f00',
+            'green':'#090',
+            'normal':'#0066cc'
 }
 
 TRAFFIC_LEFT_BEFORE_SESSION_SEARCH = re.compile('<td style="color:#000000;">(\d+\.\d+) &#208;&#191;&#208;&#190;')
@@ -22,15 +25,19 @@ def get_text(tag):
 
 class Inter():    
     def __init__(self):
-        self.last_left="n_a" 
+        self.last_left = None
+        if hasattr(settings, 'TARIFF_LIMIT_MB'):
+            self.max_value = settings.TARIFF_LIMIT_MB
+        else:
+            self.max_value = None
         self.current_dir=os.path.dirname(os.path.abspath(__file__))+'/'
         print self.current_dir 
         self.tmp_dir=self.current_dir+'tmp/'
-    
-        self.indicator = appindicator.Indicator('inter_indicator', self.current_dir+'n_a_white.png', appindicator.CATEGORY_APPLICATION_STATUS)
+
+        self.indicator = appindicator.Indicator('inter_indicator', self.current_dir+'/icon.svg', appindicator.CATEGORY_APPLICATION_STATUS)
         self.indicator.set_status( appindicator.STATUS_ACTIVE )
-        self.indicator.set_icon_theme_path(self.tmp_dir)
-        self.set_label('n_a')
+#        self.indicator.set_icon_theme_path(self.tmp_dir)
+        self.set_label(None)
         m = gtk.Menu()
         group = None
         time_1min_item = gtk.RadioMenuItem(group,'1 min')
@@ -197,55 +204,50 @@ class Inter():
     def quit(self, item):
             gtk.main_quit()
     
-    def set_label_old(self, value, text_color='white'):
-        print "set_label: %s" % value
-        text=str(value)
-        font = ImageFont.truetype("Arial_Bold.ttf",14)
-        img=Image.new("RGBA", (25,25),(0,0,0))
-        draw = ImageDraw.Draw(img)
-        if value=="n_a":
-            draw.text((1, 5),"N/A",COLOR_DICT[text_color],font=font)
-        else:
-            draw.text((1, 5),text,COLOR_DICT[text_color],font=font)
-        draw = ImageDraw.Draw(img)
-        img_path=self.tmp_dir+text+'_'+text_color+'.png'
-        print img_path
-        img.save(img_path)
-        self.indicator.set_icon(text)
-    
-    def set_label(self, value, text_color='white'):
-        print "set_label: %s of color %s" % (value, text_color)
-        if value=="n_a":
-            text="N/A"
-        else:
+    def set_label(self, value, progress=0.0, text_color='normal', progress_color='normal'):
+        print "set_label: %s of color %s, progress = %s" % (value, text_color, progress)
+        if value:
             text=str(value)
-        STATUS_DICT={
-            'white':'T',
-            'green':'?',
-            'red':'?!'
-        }
-        text = STATUS_DICT[text_color]+":"+text
+        else:
+            text="N/A"
         self.indicator.set_label(text)
+        
+        with open(self.current_dir + '/icon.svg') as svg_file, tempfile.NamedTemporaryFile(delete=True) as temp_file:
+            svg = svg_file.read()
+            svg = svg.replace('%percent%', text)
+            svg = svg.replace('%color%', COLOR_DICT[text_color])
+            svg = svg.replace('%progress_color%', COLOR_DICT[progress_color])
+            if progress:
+                svg = svg.replace('%path%', self.create_svg_arc_path(progress))
+            print temp_file.name
+            temp_file.write(svg)
+            temp_file.flush()
+            self.indicator.set_icon(temp_file.name)
+
         while gtk.events_pending():
             gtk.main_iteration()
     
     def update(self, action=None):
-        self.set_label(self.last_left, text_color='green')
-        time.sleep(3)
-	timeout = self.timeout
+        print "=== update ==="
+        if not self.last_left:
+            self.set_label('N/A', 0, text_color='green')
+        timeout = self.timeout
         try:
             stats=self.get_stats()
             self.last_left=int(stats['traffic_left'])
+            self.max_value = self.max_value or self.last_left
+            percentage = float(self.last_left) / float(self.max_value)
         except Exception:
             print "Update problem ... Last Left: %s" % self.last_left            
             self.set_label(self.last_left, text_color='red')
             self.traffic_left_label.set_label("Traffic Left: N/A")
             self.money_left_label.set_label("Money:  N/A")
             self.ip_label.set_label("IP: N/A")
-	    timeout = 10*60*1000 #10 minutes
+            timeout = 10*60*1000 #10 minutes
         else:
             print "Updating... Left: %s" % self.last_left
-            self.set_label(self.last_left)
+            color = 'normal' if percentage > 0.2 else 'red'
+            self.set_label(self.last_left, progress=percentage, progress_color=color)
             self.traffic_left_label.set_label("Traffic Left: %s Mb" % self.last_left)
             self.money_left_label.set_label("Money: %s" % stats['money_left'])
             self.ip_label.set_label("IP: %s" % stats['ip'])
@@ -254,6 +256,22 @@ class Inter():
         except Exception:
             pass
         self.source_id = gobject.timeout_add(timeout, self.update)
+        
+    def create_svg_arc_path(self, percentage):
+        print 'generating path', percentage
+        percentage = percentage if percentage != 1.0 else 0.99
+        canvasSize = 64
+        centre = canvasSize / 2
+        radius = canvasSize * 0.8 / 2
+        startY = centre-radius
+
+        d = percentage * 360
+        radians = math.pi * (d - 90) / 180
+        endx = centre + radius * math.cos(radians)
+        endy = centre + radius * math.sin(radians)
+        largeArc = 1 if d > 180 else 0
+        return "M{},{} A{},{} 0 {},1 {},{}".format(centre, startY, radius, radius, largeArc, endx, endy)
+
 
 if __name__ ==  '__main__':
     inter=Inter()
